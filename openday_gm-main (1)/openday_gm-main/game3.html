@@ -39,6 +39,7 @@
     <div id="game-over-screen" style="display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.85); color: white; padding: 40px; border-radius: 20px; text-align: center; z-index: 1000; border: 2px solid #ff6600; min-width: 300px;">
       <h1 id="over-msg" style="color: #ff4444; margin-top: 0;">遊戲結束</h1>
       <p style="font-size: 1.5em;">本次距離: <span id="final-dist">0</span>m</p>
+      <p id="countdown-text" style="font-size: 1.2em; color: #ffcc00; margin: 16px 0 0;">5 秒後將自動返回</p>
       <button onclick="location.reload()" style="background: #ff6600; color: white; border: none; padding: 10px 30px; font-size: 1.2em; border-radius: 5px; cursor: pointer; margin-top: 20px;">再試一次</button>
     </div>
 
@@ -284,6 +285,8 @@
         }
         
 
+        let gameOverCountdown = null;
+
         function gameOver(msg) {
           gameActive = false;
           const finalDist = Math.floor(distance);
@@ -297,10 +300,28 @@
           const screen = document.getElementById('game-over-screen');
           const msgElement = document.getElementById('over-msg');
           const distElement = document.getElementById('final-dist');
+          const countdownText = document.getElementById('countdown-text');
 
           msgElement.innerText = msg;
           distElement.innerText = finalDist;
           screen.style.display = 'block';
+
+          // 5 秒倒數後跳轉
+          let countdown = 5;
+          countdownText.innerText = `${countdown} 秒後將自動返回`;
+          if (gameOverCountdown) {
+              clearInterval(gameOverCountdown);
+          }
+          gameOverCountdown = setInterval(() => {
+              countdown -= 1;
+              if (countdown > 0) {
+                  countdownText.innerText = `${countdown} 秒後將自動返回`;
+              } else {
+                  clearInterval(gameOverCountdown);
+                  countdownText.innerText = '正在跳轉...';
+                  location.href = '/.index.html';
+              }
+          }, 1000);
 
           // 停止 AI 偵測循環（可選，節省效能）
           detector = null; 
