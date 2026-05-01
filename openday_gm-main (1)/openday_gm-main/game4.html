@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>逆水魚群引導遊戲</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <style>
+        body { margin: 0; display: flex; flex-direction: column; align-items: center; background: #001122; color: white; font-family: sans-serif; }
+        canvas { border: 2px solid #fff; background: #003344; }
+        #status { margin: 10px; font-size: 18px; }
+        #info { margin: 10px; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <h1>逆水魚群引導遊戲</h1>
+    <div id="status">正在初始化...</div>
+    <div id="info">魚群數量: 10 | 珍珠: 0</div>
+    <img id="input_stream" src="http://localhost:3000/video_feed" style="display: none;" crossorigin="anonymous">
+    <canvas id="game_canvas" width="800" height="600"></canvas>
+
+    <script>
+        const canvas = document.getElementById('game_canvas');
+        const ctx = canvas.getContext('2d');
+        const status = document.getElementById('status');
+        const info = document.getElementById('info');
+        const imageElement = document.getElementById('input_stream');
+
+        // 遊戲變數
+        let fish = [];
+        let obstacles = [];
+        let pearls = [];
+        let currents = [];
+        let gameOver = false;
+        let fishCount = 10;
+        let pearlCount = 0;
+        let handPositions = { left: null, right: null };
+        let gestureState = { attract: false, repel: false, together: false, apart: false };
+
+        // Boids 參數
+        const maxSpeed = 2;
+        const maxForce = 0.1;
+        const separationRadius = 20;
+        const alignmentRadius = 50;
+        const cohesionRadius = 50;
+
+        // 初始化魚群
+        function initFish() {
+            fish = [];
+            for (let i = 0; i < fishCount; i++) {
+                fish.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height,
+                    vx: (Math.random() - 0.5) * 2,
+                    vy: (Math.random() - 0.5) * 2,
+                    ax: 0,
+                    ay: 0
+                });
+            }
+        }
+
+        // 初始化障礙物
+        function initObstacles() {
+            obstacles = [];
+            for (let i = 0; i < 5; i++) {
+                obstacles.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height,
+                    type: Math.random() > 0.5 ? 'anemone' : 'vortex',
+                    radius: 30
+                });
+            }
+        }
+
+        // 初始化珍珠
+        function initPearls() {
+            pearls = [];
+            for (let i = 0; i < 3; i++) {
+                pearls.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height,
+                    radius: 10
+                });
+            }
+        }
+
+        // 初始化水流
+        function initCurrents() {
+            currents = [];
+            for (let i = 0; i < 10; i++) {
+                currents.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height,
+                    strength: Math.random() * 0.5 + 0.1
+                });
+            }
+        }
+
+        // 手勢偵測
+        function isOpenPalm(landmarks) {
+            // 簡化：檢查手指是否張開
+            const fingerTips = [8, 12, 16, 20];
+            const fingerBases = [5, 9, 13, 17];
+            return fingerTips.every((tip, i) => landmarks[tip].y < landmarks[fingerBases[i]].y);
+        }
+
+        function isFist(landmarks) {
+            const fingerTips = [8, 12, 16, 20];
+            const fingerKnuckles = [6, 10, 14, 18];
+            return fingerTips.every((tip, i) => landmarks[tip].y > landmarks[fingerKnuckles[i]].y);
+        }
+
+        // 更新手勢狀態
+        function updateGestureState(results) {
+            gestureState = { attract: false, repel: false, together: false, apart: false };
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const hands = results.multiHandLandmarks.map((landmarks, i) => ({
+                    landmarks,
+                    handedness: results.multiHandedness[i].label
+                }));
+
+                hands.forEach(hand => {
+                    const centerX = hand.landmarks.reduce((sum, lm) => sum + lm.x, 0) / hand.landmarks.length * canvas.width;
+                    const centerY = hand.landmarks.reduce((sum, lm) => sum + lm.y, 0) / hand.landmarks.length * canvas.height;
+
+                    if (hand.handedness === 'Left') {
+                        handPositions.left = { x: centerX, y: centerY };
+                    } else {
+                        handPositions.right = { x: centerX, y: centerY };
+                    }
+
+                    if (isOpenPalm(hand.landmarks)) {
+                        gestureState.attract = true;
+                    } else if (isFist(hand.landmarks)) {
+                        gestureState.repel = true;
+                    }
+                });
+
+                if (handPositions.left && handPositions.right) {
+                    const distance = Math.sqrt((handPositions.left.x - handPositions.right.x)**2 + (handPositions.left.y - handPositions.right.y)**2);
+                    if (distance < 100) {
+                        gestureState.together = true;
+                    } else {
+                        gestureState.apart = true;
+                    }
+                }
+            } else {
+                handPositions = { left: null, right: null };
+            }
+        }
+
+        // Boids 算法
+        function applyBoids() {
+            fish.forEach(f => {
+                let sep = { x: 0, y: 0 };
+                let ali = { x: 0, y: 0 };
+                let coh = { x: 0, y: 0 };
+                let sepCount = 0;
+                let aliCount = 0;
+                let cohCount = 0;
+
+                fish.forEach(other => {
+                    const dist = Math.sqrt((f.x - other.x)**2 + (f.y - other.y)**2);
+                    if (dist > 0) {
+                        if (dist < separationRadius) {
+                            sep.x += (f.x - other.x) / dist;
+                            sep.y += (f.y - other.y) / dist;
+                            sepCount++;
+                        }
+                        if (dist < alignmentRadius) {
+                            ali.x += other.vx;
+                            ali.y += other.vy;
+                            aliCount++;
+                        }
+                        if (dist < cohesionRadius) {
+                            coh.x += other.x;
+                            coh.y += other.y;
+                            cohCount++;
+                        }
+                    }
+                });
+
+                if (sepCount > 0) {
+                    sep.x /= sepCount;
+                    sep.y /= sepCount;
+                    const mag = Math.sqrt(sep.x**2 + sep.y**2);
+                    if (mag > 0) {
+                        sep.x = (sep.x / mag) * maxSpeed - f.vx;
+                        sep.y = (sep.y / mag) * maxSpeed - f.vy;
+                        const sepMag = Math.sqrt(sep.x**2 + sep.y**2);
+                        if (sepMag > maxForce) {
+                            sep.x = (sep.x / sepMag) * maxForce;
+                            sep.y = (sep.y / sepMag) * maxForce;
+                        }
+                    }
+                }
+
+                if (aliCount > 0) {
+                    ali.x /= aliCount;
+                    ali.y /= aliCount;
+                    const mag = Math.sqrt(ali.x**2 + ali.y**2);
+                    if (mag > 0) {
+                        ali.x = (ali.x / mag) * maxSpeed - f.vx;
+                        ali.y = (ali.y / mag) * maxSpeed - f.vy;
+                        const aliMag = Math.sqrt(ali.x**2 + ali.y**2);
+                        if (aliMag > maxForce) {
+                            ali.x = (ali.x / aliMag) * maxForce;
+                            ali.y = (ali.y / aliMag) * maxForce;
+                        }
+                    }
+                }
+
+                if (cohCount > 0) {
+                    coh.x /= cohCount;
+                    coh.y /= cohCount;
+                    coh.x = coh.x - f.x;
+                    coh.y = coh.y - f.y;
+                    const mag = Math.sqrt(coh.x**2 + coh.y**2);
+                    if (mag > 0) {
+                        coh.x = (coh.x / mag) * maxSpeed - f.vx;
+                        coh.y = (coh.y / mag) * maxSpeed - f.vy;
+                        const cohMag = Math.sqrt(coh.x**2 + coh.y**2);
+                        if (cohMag > maxForce) {
+                            coh.x = (coh.x / cohMag) * maxForce;
+                            coh.y = (coh.y / cohMag) * maxForce;
+                        }
+                    }
+                }
+
+                f.ax = sep.x + ali.x + coh.x;
+                f.ay = sep.y + ali.y + coh.y;
+            });
+        }
+
+        // 應用手勢影響
+        function applyGestures() {
+            fish.forEach(f => {
+                if (gestureState.attract && handPositions.left) {
+                    const dx = handPositions.left.x - f.x;
+                    const dy = handPositions.left.y - f.y;
+                    const dist = Math.sqrt(dx**2 + dy**2);
+                    if (dist > 0) {
+                        f.ax += (dx / dist) * 0.5;
+                        f.ay += (dy / dist) * 0.5;
+                    }
+                }
+                if (gestureState.repel) {
+                    // 散開邏輯：遠離中心
+                    const centerX = canvas.width / 2;
+                    const centerY = canvas.height / 2;
+                    const dx = f.x - centerX;
+                    const dy = f.y - centerY;
+                    const dist = Math.sqrt(dx**2 + dy**2);
+                    if (dist > 0) {
+                        f.ax += (dx / dist) * 0.5;
+                        f.ay += (dy / dist) * 0.5;
+                    }
+                }
+                if (gestureState.together) {
+                    // 加速向前
+                    f.ax += 0.2;
+                }
+                if (gestureState.apart) {
+                    // 分成兩組：左邊魚向左，右邊向右
+                    if (f.x < canvas.width / 2) {
+                        f.ax -= 0.2;
+                    } else {
+                        f.ax += 0.2;
+                    }
+                }
+            });
+        }
+
+        // 應用環境影響
+        function applyEnvironment() {
+            fish.forEach(f => {
+                // 水流：向後推
+                f.ax -= 0.1;
+
+                // 障礙物
+                obstacles.forEach(obs => {
+                    const dx = f.x - obs.x;
+                    const dy = f.y - obs.y;
+                    const dist = Math.sqrt(dx**2 + dy**2);
+                    if (dist < obs.radius) {
+                        if (obs.type === 'anemone') {
+                            // 海葵：推開
+                            f.ax += (dx / dist) * 0.5;
+                            f.ay += (dy / dist) * 0.5;
+                        } else if (obs.type === 'vortex') {
+                            // 漩渦：吸入
+                            f.ax -= (dx / dist) * 0.5;
+                            f.ay -= (dy / dist) * 0.5;
+                        }
+                    }
+                });
+
+                // 珍珠：吸引
+                pearls.forEach((p, i) => {
+                    const dx = p.x - f.x;
+                    const dy = p.y - f.y;
+                    const dist = Math.sqrt(dx**2 + dy**2);
+                    if (dist < p.radius) {
+                        pearls.splice(i, 1);
+                        pearlCount++;
+                        fishCount = Math.min(10, fishCount + 1);
+                        initFish(); // 重新初始化魚群
+                    } else if (dist < 50) {
+                        f.ax += (dx / dist) * 0.1;
+                        f.ay += (dy / dist) * 0.1;
+                    }
+                });
+            });
+        }
+
+        // 更新魚群
+        function updateFish() {
+            fish.forEach(f => {
+                f.vx += f.ax;
+                f.vy += f.ay;
+                const speed = Math.sqrt(f.vx**2 + f.vy**2);
+                if (speed > maxSpeed) {
+                    f.vx = (f.vx / speed) * maxSpeed;
+                    f.vy = (f.vy / speed) * maxSpeed;
+                }
+                f.x += f.vx;
+                f.y += f.vy;
+                f.ax = 0;
+                f.ay = 0;
+
+                // 邊界檢查
+                if (f.x < 0 || f.x > canvas.width || f.y < 0 || f.y > canvas.height) {
+                    fishCount--;
+                    if (fishCount <= 0) {
+                        gameOver = true;
+                    } else {
+                        initFish();
+                    }
+                }
+            });
+        }
+
+        // 繪製
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 繪製水流
+            currents.forEach(c => {
+                ctx.strokeStyle = 'rgba(0, 255, 255, 0.3)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(c.x, c.y);
+                ctx.lineTo(c.x - 20, c.y);
+                ctx.stroke();
+            });
+
+            // 繪製障礙物
+            obstacles.forEach(obs => {
+                if (obs.type === 'anemone') {
+                    ctx.fillStyle = 'purple';
+                } else {
+                    ctx.fillStyle = 'darkblue';
+                }
+                ctx.beginPath();
+                ctx.arc(obs.x, obs.y, obs.radius, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // 繪製珍珠
+            pearls.forEach(p => {
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // 繪製魚群
+            fish.forEach(f => {
+                ctx.fillStyle = 'cyan';
+                ctx.beginPath();
+                ctx.arc(f.x, f.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // 繪製手部位置
+            if (handPositions.left) {
+                ctx.fillStyle = 'red';
+                ctx.beginPath();
+                ctx.arc(handPositions.left.x, handPositions.left.y, 10, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            if (handPositions.right) {
+                ctx.fillStyle = 'blue';
+                ctx.beginPath();
+                ctx.arc(handPositions.right.x, handPositions.right.y, 10, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // 遊戲循環
+        function gameLoop() {
+            if (!gameOver) {
+                applyBoids();
+                applyGestures();
+                applyEnvironment();
+                updateFish();
+            }
+            draw();
+            info.textContent = `魚群數量: ${fishCount} | 珍珠: ${pearlCount}`;
+            if (gameOver) {
+                status.textContent = '遊戲結束！';
+            }
+            requestAnimationFrame(gameLoop);
+        }
+
+        // 初始化 MediaPipe
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+        });
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5,
+        });
+        hands.onResults((results) => {
+            updateGestureState(results);
+        });
+
+        // 啟動
+        imageElement.onload = () => {
+            status.textContent = '遊戲開始！';
+            initFish();
+            initObstacles();
+            initPearls();
+            initCurrents();
+            gameLoop();
+
+            function predictLoop() {
+                if (imageElement.complete && imageElement.naturalWidth !== 0) {
+                    hands.send({ image: imageElement });
+                }
+                requestAnimationFrame(predictLoop);
+            }
+            predictLoop();
+        };
+    </script>
+</body>
+</html></content>
+<parameter name="filePath">/workspaces/opendaygame_2/openday_gm-main (1)/openday_gm-main/game4.html
